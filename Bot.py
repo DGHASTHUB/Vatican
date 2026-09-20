@@ -4,7 +4,7 @@ import telebot
 import json
 import os
 
-TOKEN = ""
+TOKEN = "8945074503:AAFfjC0w1epRAa2ujt4uLLsH1Gq4t7ooMVo"
 bot = telebot.TeleBot(TOKEN)
 
 DATA_FILE = "bot_data.json"
