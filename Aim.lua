@@ -12,12 +12,18 @@ local Camera = Workspace.CurrentCamera
 --------------------------------------------------------------------------------
 local Config = {
     AimEnabled = false,
-    TargetPart = "Head", -- "Head" hoặc "HumanoidRootPart" (Torso)
+    TargetPart = "Head", -- "Head" hoặc "HumanoidRootPart"
     OffAfterKill = false,
     ShowHP = false,
-    FOVRadius = 150, -- Bán kính kiểm tra mục tiêu (studs)
-    AutoLockOffDistance = 150,
-    TeamCheck = true
+    AutoLockOffDistance = 150, -- Bán kính 3D (Studs)
+    TeamCheck = true,
+    WallCheck = true,
+    
+    -- MỚI: Smooth Aim & FOV Circle Config
+    Smoothness = 0.5, -- Độ mượt (0.1 = Rất mượt/chậm, 1 = Ghim tức thì)
+    UseFOV = true, -- Bật/Tắt vòng tròn FOV
+    FOVRadius = 120, -- Bán kính vòng tròn FOV (Pixels)
+    FOVColor = Color3.fromRGB(255, 255, 255)
 }
 
 local CurrentTarget = nil
@@ -26,10 +32,30 @@ ESPFolder.Name = "FPS_ESP_Folder"
 ESPFolder.Parent = Workspace
 
 --------------------------------------------------------------------------------
+-- DRAWING API: FOV CIRCLE CREATION
+--------------------------------------------------------------------------------
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1.5
+FOVCircle.NumSides = 64
+FOVCircle.Radius = Config.FOVRadius
+FOVCircle.Filled = false
+FOVCircle.Visible = Config.UseFOV
+FOVCircle.Color = Config.FOVColor
+FOVCircle.Transparency = 0.8
+
+-- Cập nhật vị trí FOV Circle theo tâm màn hình thời gian thực
+RunService.RenderStepped:Connect(function()
+    local viewportSize = Camera.ViewportSize
+    FOVCircle.Position = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+    FOVCircle.Radius = Config.FOVRadius
+    FOVCircle.Visible = Config.UseFOV and Config.AimEnabled
+end)
+
+--------------------------------------------------------------------------------
 -- CORE AIM ASSIST & HELPER FUNCTIONS
 --------------------------------------------------------------------------------
 
--- Kiểm tra xem 2 player có thuộc cùng team hoặc không thể gây sát thương
+-- Kiểm tra đồng đội
 local function IsTeammate(player)
     if not Config.TeamCheck then return false end
     if player.Team ~= nil and LocalPlayer.Team ~= nil then
@@ -38,7 +64,46 @@ local function IsTeammate(player)
     return false
 end
 
--- Kiểm tra mục tiêu hợp lệ trong tầm bắn
+-- Kiểm tra Wall Check
+local function IsVisible(targetPart)
+    if not Config.WallCheck then return true end
+    
+    local myChar = LocalPlayer.Character
+    if not myChar then return false end
+    
+    local origin = Camera.CFrame.Position
+    local destination = targetPart.Position
+    local direction = destination - origin
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local ignoreList = {myChar}
+    if targetPart.Parent then
+        table.insert(ignoreList, targetPart.Parent)
+    end
+    raycastParams.FilterDescendantsInstances = ignoreList
+    raycastParams.IgnoreWater = true
+
+    local result = Workspace:Raycast(origin, direction, raycastParams)
+    return result == nil
+end
+
+-- Kiểm tra mục tiêu có nằm trong vòng tròn FOV Circle trên màn hình hay không
+local function IsInFOV(targetPart)
+    if not Config.UseFOV then return true end
+    
+    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+    if not onScreen then return false end
+    
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local targetVector = Vector2.new(screenPos.X, screenPos.Y)
+    local distance = (targetVector - screenCenter).Magnitude
+    
+    return distance <= Config.FOVRadius
+end
+
+-- Kiểm tra hợp lệ mục tiêu
 local function IsValidTarget(player)
     if player == LocalPlayer then return false end
     if IsTeammate(player) then return false end
@@ -52,10 +117,13 @@ local function IsValidTarget(player)
     if not humanoid or humanoid.Health <= 0 then return false end
     if not targetPart then return false end
     
+    -- Kiểm tra Wall Check
+    if not IsVisible(targetPart) then return false end
+    
     return true, character, humanoid, targetPart
 end
 
--- Tìm kẻ địch gần nhất trong bán kính Config.FOVRadius (3D Space)
+-- Tìm kẻ địch gần tâm ngắm nhất (thỏa mãn cả 3D Studs + 2D FOV Circle)
 local function GetNearestEnemy()
     local myChar = LocalPlayer.Character
     if not myChar then return nil end
@@ -63,21 +131,33 @@ local function GetNearestEnemy()
     if not myRoot then return nil end
     
     local closestEnemy = nil
-    local shortestDistance = Config.FOVRadius
+    local shortestScreenDist = math.huge
+
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     for _, player in ipairs(Players:GetPlayers()) do
         local valid, character, humanoid, targetPart = IsValidTarget(player)
         if valid then
-            local dist = (targetPart.Position - myRoot.Position).Magnitude
-            if dist <= shortestDistance then
-                shortestDistance = dist
-                closestEnemy = {
-                    Player = player,
-                    Character = character,
-                    Humanoid = humanoid,
-                    Part = targetPart,
-                    Distance = dist
-                }
+            local dist3D = (targetPart.Position - myRoot.Position).Magnitude
+            
+            -- Phải ở trong bán kính 150 studs
+            if dist3D <= Config.AutoLockOffDistance then
+                -- Kiểm tra vị trí màn hình 2D
+                if IsInFOV(targetPart) then
+                    local screenPos = Camera:WorldToViewportPoint(targetPart.Position)
+                    local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    
+                    if screenDist < shortestScreenDist then
+                        shortestScreenDist = screenDist
+                        closestEnemy = {
+                            Player = player,
+                            Character = character,
+                            Humanoid = humanoid,
+                            Part = targetPart,
+                            Distance = dist3D
+                        }
+                    end
+                end
             end
         end
     end
@@ -106,7 +186,7 @@ local function GetEnemiesIn150Studs()
 end
 
 --------------------------------------------------------------------------------
--- HIGH-SPEED AIM BOT ENGINE (RenderStepped Execution)
+-- HIGH-SPEED AIM BOT ENGINE WITH SMOOTH LERP
 --------------------------------------------------------------------------------
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
 
@@ -120,25 +200,24 @@ RunService:BindToRenderStep("UltraFastAimAssistEngine", RENDER_PRIORITY, functio
                 CurrentTarget = nil
             end
         else
-            -- Tự động kích hoạt lại nếu phát hiện kẻ địch đột ngột xuất hiện trong 150 studs
             if not Config.AimEnabled then
                 Config.AimEnabled = true
             end
         end
     end
 
-    -- Xử lý Ghim Tâm
+    -- Xử lý Ghim Tâm với Smooth Aim
     if Config.AimEnabled then
         local targetData = GetNearestEnemy()
         if targetData then
             CurrentTarget = targetData
             
-            -- Tốc độ x10 Instant Lock (Không Delay): Cập nhật CFrame trực tiếp của Camera tới vị trí Target
             local targetPos = targetData.Part.Position
             local camPos = Camera.CFrame.Position
+            local targetCFrame = CFrame.new(camPos, targetPos)
             
-            -- Ép Camera nhìn thẳng vào vị trí mục tiêu ngay lập tức không phụ thuộc raycast hay màn hình
-            Camera.CFrame = CFrame.new(camPos, targetPos)
+            -- Sử dụng Lerp để chuyển góc nhìn mượt mà dựa trên tham số Smoothness
+            Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, math.clamp(Config.Smoothness, 0.01, 1))
         else
             CurrentTarget = nil
         end
@@ -198,18 +277,17 @@ for _, p in ipairs(Players:GetPlayers()) do CreateESP(p) end
 Players.PlayerAdded:Connect(CreateESP)
 
 --------------------------------------------------------------------------------
--- DRAGGABLE & FLOATING GUI CREATION
+-- GUI CREATION WITH SMOOTH & FOV CONTROLS
 --------------------------------------------------------------------------------
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "FPS_AimAssist_UI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
--- Frame chính
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 240, 0, 320)
-MainFrame.Position = UDim2.new(0.5, -120, 0.4, -160)
+MainFrame.Size = UDim2.new(0, 240, 0, 470) -- Tăng chiều cao để bổ sung thêm các tùy chỉnh mới
+MainFrame.Position = UDim2.new(0.5, -120, 0.4, -235)
 MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
@@ -230,7 +308,6 @@ TitleBar.TextXAlignment = Enum.TextXAlignment.Left
 TitleBar.BackgroundTransparency = 1
 TitleBar.Parent = MainFrame
 
--- Nút Thu nhỏ (Minimize Button)
 local MinimizeBtn = Instance.new("TextButton")
 MinimizeBtn.Size = UDim2.new(0, 25, 0, 25)
 MinimizeBtn.Position = UDim2.new(1, -30, 0, 5)
@@ -245,7 +322,6 @@ local MinCorner = Instance.new("UICorner")
 MinCorner.CornerRadius = UDim.new(1, 0)
 MinCorner.Parent = MinimizeBtn
 
--- Floating Circle Button (Hiển thị khi GUI thu nhỏ)
 local FloatCircle = Instance.new("TextButton")
 FloatCircle.Name = "FloatCircle"
 FloatCircle.Size = UDim2.new(0, 50, 0, 50)
@@ -264,7 +340,7 @@ CircleCorner.CornerRadius = UDim.new(1, 0)
 CircleCorner.Parent = FloatCircle
 
 --------------------------------------------------------------------------------
--- DRAGGABLE LOGIC FOR MAIN FRAME & FLOATING CIRCLE
+-- DRAGGABLE LOGIC
 --------------------------------------------------------------------------------
 local function MakeDraggable(guiObject)
     local dragging, dragInput, dragStart, startPos
@@ -319,12 +395,12 @@ UIListLayout.Parent = Container
 
 local function CreateToggleButton(text, defaultState, callback)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 35)
+    btn.Size = UDim2.new(1, 0, 0, 32)
     btn.BackgroundColor3 = defaultState and Color3.fromRGB(0, 170, 100) or Color3.fromRGB(40, 40, 50)
     btn.Text = text .. ": " .. (defaultState and "ON" or "OFF")
     btn.TextColor3 = Color3.fromRGB(255, 255, 255)
     btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 12
+    btn.TextSize = 11
     btn.Parent = Container
 
     local btnCorner = Instance.new("UICorner")
@@ -342,18 +418,18 @@ local function CreateToggleButton(text, defaultState, callback)
 end
 
 -- 1. Aim Assist Toggle
-local AimBtn = CreateToggleButton("Aim Assist Ultra", Config.AimEnabled, function(st)
+CreateToggleButton("Aim Assist Ultra", Config.AimEnabled, function(st)
     Config.AimEnabled = st
 end)
 
 -- 2. Target Body Part Selector
 local TargetPartBtn = Instance.new("TextButton")
-TargetPartBtn.Size = UDim2.new(1, 0, 0, 35)
+TargetPartBtn.Size = UDim2.new(1, 0, 0, 32)
 TargetPartBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
 TargetPartBtn.Text = "Target Part: HEAD"
 TargetPartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 TargetPartBtn.Font = Enum.Font.GothamSemibold
-TargetPartBtn.TextSize = 12
+TargetPartBtn.TextSize = 11
 TargetPartBtn.Parent = Container
 
 local TPartCorner = Instance.new("UICorner")
@@ -370,17 +446,83 @@ TargetPartBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- 3. Off After Kill Toggle
+-- 3. MỚI: Smooth Aim Adjuster
+local SmoothBtn = Instance.new("TextButton")
+SmoothBtn.Size = UDim2.new(1, 0, 0, 32)
+SmoothBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+SmoothBtn.Text = "Smoothness: FAST (0.5)"
+SmoothBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SmoothBtn.Font = Enum.Font.GothamSemibold
+SmoothBtn.TextSize = 11
+SmoothBtn.Parent = Container
+
+local SmoothCorner = Instance.new("UICorner")
+SmoothCorner.CornerRadius = UDim.new(0, 6)
+SmoothCorner.Parent = SmoothBtn
+
+local smoothStates = {
+    {Name = "INSTANT (1.0)", Val = 1.0},
+    {Name = "FAST (0.5)", Val = 0.5},
+    {Name = "MEDIUM (0.2)", Val = 0.2},
+    {Name = "SLOW/SMOOTH (0.08)", Val = 0.08}
+}
+local currentSmoothIdx = 2
+
+SmoothBtn.MouseButton1Click:Connect(function()
+    currentSmoothIdx = (currentSmoothIdx % #smoothStates) + 1
+    Config.Smoothness = smoothStates[currentSmoothIdx].Val
+    SmoothBtn.Text = "Smoothness: " .. smoothStates[currentSmoothIdx].Name
+end)
+
+-- 4. MỚI: Toggle FOV Circle
+CreateToggleButton("Draw FOV Circle", Config.UseFOV, function(st)
+    Config.UseFOV = st
+end)
+
+-- 5. MỚI: Adjust FOV Size
+local FOVBtn = Instance.new("TextButton")
+FOVBtn.Size = UDim2.new(1, 0, 0, 32)
+FOVBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+FOVBtn.Text = "FOV Size: MEDIUM (120px)"
+FOVBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+FOVBtn.Font = Enum.Font.GothamSemibold
+FOVBtn.TextSize = 11
+FOVBtn.Parent = Container
+
+local FOVCorner = Instance.new("UICorner")
+FOVCorner.CornerRadius = UDim.new(0, 6)
+FOVCorner.Parent = FOVBtn
+
+local fovSizes = {
+    {Name = "SMALL (80px)", Val = 80},
+    {Name = "MEDIUM (120px)", Val = 120},
+    {Name = "LARGE (200px)", Val = 200},
+    {Name = "ULTRA (350px)", Val = 350}
+}
+local currentFovIdx = 2
+
+FOVBtn.MouseButton1Click:Connect(function()
+    currentFovIdx = (currentFovIdx % #fovSizes) + 1
+    Config.FOVRadius = fovSizes[currentFovIdx].Val
+    FOVBtn.Text = "FOV Size: " .. fovSizes[currentFovIdx].Name
+end)
+
+-- 6. Wall Check Toggle
+CreateToggleButton("Wall Check (Visible Only)", Config.WallCheck, function(st)
+    Config.WallCheck = st
+end)
+
+-- 7. Off After Kill Toggle
 CreateToggleButton("Off/Auto-On (150 Studs)", Config.OffAfterKill, function(st)
     Config.OffAfterKill = st
 end)
 
--- 4. Show HP Toggle
+-- 8. Show HP Toggle
 CreateToggleButton("Show HP (ESP)", Config.ShowHP, function(st)
     Config.ShowHP = st
 end)
 
--- 5. Team Check Toggle
+-- 9. Team Check Toggle
 CreateToggleButton("Team Check", Config.TeamCheck, function(st)
     Config.TeamCheck = st
 end)
